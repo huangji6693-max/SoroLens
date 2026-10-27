@@ -28,12 +28,14 @@ type fakeSource struct {
 	event         source.Event
 	stats         source.Stats
 	contractStats source.ContractStats
+	buckets       source.BucketSeries
 	status        source.Status
 
 	err error
 
 	lastEventQuery    source.EventQuery
 	lastContractQuery source.ContractQuery
+	lastBucketQuery   source.BucketQuery
 	lastEventID       string
 }
 
@@ -54,6 +56,11 @@ func (f *fakeSource) GetEvent(_ context.Context, id string) (source.Event, error
 
 func (f *fakeSource) ContractStats(context.Context, string) (source.ContractStats, error) {
 	return f.contractStats, f.err
+}
+
+func (f *fakeSource) EventBuckets(_ context.Context, q source.BucketQuery) (source.BucketSeries, error) {
+	f.lastBucketQuery = q
+	return f.buckets, f.err
 }
 
 func (f *fakeSource) Stats(context.Context) (source.Stats, error) { return f.stats, f.err }

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -147,6 +149,148 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *Server) handleEventBuckets(w http.ResponseWriter, r *http.Request) {
+	q, err := BucketQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+
+	series, err := s.src.EventBuckets(r.Context(), q)
+	if err != nil {
+		s.fail(w, r, "loading event buckets", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
+}
+
+func (s *Server) handleContractBuckets(w http.ResponseWriter, r *http.Request) {
+	contractID := chi.URLParam(r, "id")
+	if !config.ValidContractID(contractID) {
+		writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid contract ID %q", contractID))
+		return
+	}
+
+	q, err := BucketQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	q.ContractID = contractID
+
+	series, err := s.src.EventBuckets(r.Context(), q)
+	if err != nil {
+		s.fail(w, r, "loading contract event buckets", err)
+		return
+	}
+	writeJSON(w, http.StatusOK, series)
+}
+
+// BucketQueryFromRequest parses and validates time-bucketed aggregation query
+// parameters: contract_id, type, topic, from, to, and interval. It enforces the
+// shared MaxBuckets cap so an unauthenticated caller cannot request a tiny
+// interval across a wide time span.
+func BucketQueryFromRequest(r *http.Request) (source.BucketQuery, error) {
+	params := r.URL.Query()
+	var q source.BucketQuery
+
+	if contractID := params.Get("contract_id"); contractID != "" {
+		if !config.ValidContractID(contractID) {
+			return q, fmt.Errorf("invalid contract_id %q", contractID)
+		}
+		q.ContractID = contractID
+	}
+
+	switch t := params.Get("type"); t {
+	case "", "contract", "system", "diagnostic":
+		q.Type = t
+	default:
+		return q, fmt.Errorf("invalid type %q (want contract, system or diagnostic)", t)
+	}
+
+	if topic := params.Get("topic"); topic != "" {
+		if json.Valid([]byte(topic)) {
+			q.Topic = json.RawMessage(topic)
+		} else {
+			encoded, err := json.Marshal(map[string]string{"symbol": topic})
+			if err != nil {
+				return q, fmt.Errorf("invalid topic: %w", err)
+			}
+			q.Topic = encoded
+		}
+	}
+
+	from, err := parseTimestamp(params.Get("from"), "from")
+	if err != nil {
+		return q, err
+	}
+	to, err := parseTimestamp(params.Get("to"), "to")
+	if err != nil {
+		return q, err
+	}
+	if from.After(to) {
+		return q, fmt.Errorf("from (%s) must not be after to (%s)", from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	q.From = from
+	q.To = to
+
+	interval, err := parseBucketInterval(params.Get("interval"))
+	if err != nil {
+		return q, err
+	}
+	q.Interval = interval
+
+	span := q.To.Sub(q.From)
+	buckets := int64(span / q.Interval)
+	if span%q.Interval != 0 {
+		buckets++
+	}
+	if buckets > source.MaxBuckets {
+		return q, fmt.Errorf("requested range produces %d buckets, exceeding maximum of %d", buckets, source.MaxBuckets)
+	}
+
+	return q, nil
+}
+
+func parseTimestamp(raw, name string) (time.Time, error) {
+	if raw == "" {
+		return time.Time{}, fmt.Errorf("%s is required (RFC3339 timestamp)", name)
+	}
+	t, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("%s must be a valid RFC3339 timestamp", name)
+	}
+	return t.UTC(), nil
+}
+
+func parseBucketInterval(raw string) (time.Duration, error) {
+	if raw == "" {
+		return time.Hour, nil
+	}
+	var (
+		d   time.Duration
+		err error
+	)
+	if strings.HasSuffix(raw, "d") {
+		days, parseErr := strconv.Atoi(strings.TrimSuffix(raw, "d"))
+		if parseErr != nil || days <= 0 {
+			return 0, fmt.Errorf("invalid interval %q", raw)
+		}
+		d = time.Duration(days) * 24 * time.Hour
+	} else {
+		d, err = time.ParseDuration(raw)
+		if err != nil {
+			return 0, fmt.Errorf("invalid interval %q", raw)
+		}
+	}
+	if d < source.MinBucketInterval || d > source.MaxBucketInterval || d%time.Second != 0 {
+		return 0, fmt.Errorf("interval must be between %s and %s in whole seconds",
+			source.FormatBucketInterval(source.MinBucketInterval),
+			source.FormatBucketInterval(source.MaxBucketInterval))
+	}
+	return d, nil
 }
 
 // EventQueryFromRequest parses the event filter query parameters shared by the

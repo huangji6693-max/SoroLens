@@ -432,6 +432,36 @@ func TestContractStats(t *testing.T) {
 	assert.Equal(t, int64(30), stats.TypeBreakdown[0].Count)
 }
 
+func TestEventBuckets(t *testing.T) {
+	base := time.Unix(1700001000, 0).UTC()
+	events := []source.Event{
+		{ID: "0000001000-0000000001", ContractID: "CABC", Ledger: 1000, Type: "contract", LedgerClosedAt: base},
+		{ID: "0000001001-0000000001", ContractID: "CABC", Ledger: 1001, Type: "contract", LedgerClosedAt: base.Add(30 * time.Second)},
+		// 1m .. 2m is a gap with 0 events
+		{ID: "0000001002-0000000001", ContractID: "CABC", Ledger: 1002, Type: "contract", LedgerClosedAt: base.Add(2 * time.Minute)},
+	}
+	src := newTestSource(newFakeIndexer(events))
+	ctx := context.Background()
+
+	series, err := src.EventBuckets(ctx, source.BucketQuery{
+		ContractID: "CABC",
+		From:       base,
+		To:         base.Add(3 * time.Minute),
+		Interval:   time.Minute,
+	})
+	require.NoError(t, err)
+	require.Len(t, series.Buckets, 3)
+	assert.Equal(t, int64(2), series.Buckets[0].Count)
+	assert.Equal(t, int64(0), series.Buckets[1].Count, "quiet interval must be preserved with zero count")
+	assert.Equal(t, int64(1), series.Buckets[2].Count)
+	assert.Equal(t, int64(3), series.TotalEvents)
+	assert.False(t, series.Approximate, "scan exhausted history so counts are exact")
+
+	cStats, err := src.ContractStats(ctx, "CABC")
+	require.NoError(t, err)
+	assert.Equal(t, cStats.TotalEvents, series.TotalEvents, "bucket sum over full range must match ContractStats total")
+}
+
 func TestStatusReportsHealth(t *testing.T) {
 	t.Run("healthy", func(t *testing.T) {
 		src := newTestSource(newFakeIndexer(makeEvents(5, 1000, "CABC")))

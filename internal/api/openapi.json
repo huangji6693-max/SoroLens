@@ -216,6 +216,134 @@
         }
       }
     },
+    "/events/buckets": {
+      "get": {
+        "summary": "Aggregate event counts into contiguous half-open [start, end) time buckets over on-chain ledger_closed_at",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^C[A-Z2-7]{55}$"
+            },
+            "description": "Optional Soroban contract strkey filter"
+          },
+          {
+            "$ref": "#/components/parameters/EventType"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Inclusive lower RFC3339 timestamp bound on ledger_closed_at"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Exclusive upper RFC3339 timestamp bound on ledger_closed_at"
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "1h"
+            },
+            "description": "Bucket width between 1m and 168h (7d), e.g. 1m, 5m, 15m, 1h, 6h, 1d; capped at 500 buckets per request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bucketed event count time series; empty buckets are included with count=0",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketSeries"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/contracts/{id}/buckets": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/ContractID"
+        }
+      ],
+      "get": {
+        "summary": "Aggregate one contract's event counts into contiguous half-open [start, end) time buckets",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/EventType"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Inclusive lower RFC3339 timestamp bound on ledger_closed_at"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Exclusive upper RFC3339 timestamp bound on ledger_closed_at"
+          },
+          {
+            "name": "interval",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "default": "1h"
+            },
+            "description": "Bucket width between 1m and 168h (7d); capped at 500 buckets per request"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Contract bucketed event count time series",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketSeries"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/stats": {
       "get": {
         "summary": "Everything visible to this source",
@@ -612,6 +740,54 @@
           },
           "build_date": {
             "type": "string"
+          }
+        }
+      },
+      "EventBucket": {
+        "type": "object",
+        "properties": {
+          "start": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive bucket start timestamp (UTC)"
+          },
+          "end": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Exclusive bucket end timestamp (UTC)"
+          },
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BucketSeries": {
+        "type": "object",
+        "properties": {
+          "interval": {
+            "type": "string"
+          },
+          "from": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "total_events": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "buckets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/EventBucket"
+            }
+          },
+          "approximate": {
+            "type": "boolean"
           }
         }
       }

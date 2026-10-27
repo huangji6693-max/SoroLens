@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -31,11 +32,14 @@ import (
 // to a 404 without knowing which backend produced it.
 var ErrNotFound = errors.New("not found")
 
-// Paging limits shared by every implementation, so a page size means the same
-// thing regardless of which backend serves it.
+// Paging and aggregation limits shared by every implementation, so bounds mean
+// the same thing regardless of which backend serves the request.
 const (
-	DefaultLimit = 50
-	MaxLimit     = 200
+	DefaultLimit      = 50
+	MaxLimit          = 200
+	MaxBuckets        = 500
+	MinBucketInterval = time.Minute
+	MaxBucketInterval = 7 * 24 * time.Hour
 )
 
 // Event is one Soroban contract event.
@@ -145,6 +149,41 @@ type ContractStats struct {
 	Approximate   bool        `json:"approximate"`
 }
 
+// BucketQuery specifies a time-bucketed event count aggregation over the
+// half-open time range [From, To), partitioned into contiguous half-open
+// [Start, End) intervals of width Interval anchored at From.
+//
+// Events are bucketed by their on-chain ledger close timestamp
+// (ledger_closed_at), not the local ingestion timestamp (created_at), so
+// backfilled or delayed ingestion never distorts the activity timeline.
+type BucketQuery struct {
+	ContractID string
+	Type       string
+	Topic      json.RawMessage
+	From       time.Time
+	To         time.Time
+	Interval   time.Duration
+}
+
+// EventBucket is one half-open time slice [Start, End) and its event count.
+type EventBucket struct {
+	Start time.Time `json:"start"`
+	End   time.Time `json:"end"`
+	Count int64     `json:"count"`
+}
+
+// BucketSeries is the response payload for time-bucketed event counts.
+type BucketSeries struct {
+	Interval    string        `json:"interval"`
+	From        time.Time     `json:"from"`
+	To          time.Time     `json:"to"`
+	TotalEvents int64         `json:"total_events"`
+	Buckets     []EventBucket `json:"buckets"`
+	// Approximate is true when the buckets were derived from a bounded scan in
+	// upstream mode rather than an exact SQL aggregate.
+	Approximate bool `json:"approximate"`
+}
+
 // Status describes a source's health and the extent of the history it holds.
 // The UI shows this prominently: standalone mode only sees events emitted
 // while it was running, which surprises people who expect a full explorer.
@@ -173,6 +212,9 @@ type EventSource interface {
 	GetEvent(ctx context.Context, id string) (Event, error)
 	// ContractStats summarizes one contract.
 	ContractStats(ctx context.Context, contractID string) (ContractStats, error)
+	// EventBuckets aggregates event counts into contiguous half-open [Start, End)
+	// time buckets over [q.From, q.To) by on-chain ledger_closed_at time.
+	EventBuckets(ctx context.Context, q BucketQuery) (BucketSeries, error)
 	// Stats summarizes everything visible to this source.
 	Stats(ctx context.Context) (Stats, error)
 	// Status reports health and history coverage. It must not return an error:
@@ -191,4 +233,81 @@ func NormalizeLimit(limit int) int {
 	default:
 		return limit
 	}
+}
+
+// FormatBucketInterval formats a bucket duration using its cleanest whole unit
+// (e.g. "15m", "1h") rather than time.Duration.String()'s trailing zeroes.
+func FormatBucketInterval(d time.Duration) string {
+	switch {
+	case d <= 0:
+		return "0s"
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int64(d/time.Minute))
+	case d%time.Second == 0:
+		return fmt.Sprintf("%ds", int64(d/time.Second))
+	default:
+		return d.String()
+	}
+}
+
+// BuildEmptyBuckets constructs the contiguous sequence of half-open [Start, End)
+// buckets covering [from, to) in steps of interval. Empty ranges (from >= to or
+// interval <= 0) return an empty non-nil slice.
+func BuildEmptyBuckets(from, to time.Time, interval time.Duration) []EventBucket {
+	from = from.UTC()
+	to = to.UTC()
+	if !from.Before(to) || interval <= 0 {
+		return []EventBucket{}
+	}
+	span := to.Sub(from)
+	n := int(span / interval)
+	if span%interval != 0 {
+		n++
+	}
+	buckets := make([]EventBucket, 0, n)
+	for start := from; start.Before(to); start = start.Add(interval) {
+		end := start.Add(interval)
+		if end.After(to) {
+			end = to
+		}
+		buckets = append(buckets, EventBucket{
+			Start: start,
+			End:   end,
+			Count: 0,
+		})
+	}
+	return buckets
+}
+
+// CountEventsIntoBuckets tallies events whose on-chain LedgerClosedAt timestamp
+// (falling back to CreatedAt when LedgerClosedAt is zero) lies within the
+// half-open range [from, to) into contiguous [Start, End) buckets of width
+// interval. Events with t == bucket.Start land in that bucket; events with
+// t == bucket.End land in the next bucket (or are excluded when bucket.End == to).
+func CountEventsIntoBuckets(from, to time.Time, interval time.Duration, events []Event) ([]EventBucket, int64) {
+	from = from.UTC()
+	to = to.UTC()
+	buckets := BuildEmptyBuckets(from, to, interval)
+	if len(buckets) == 0 {
+		return buckets, 0
+	}
+	var total int64
+	for _, e := range events {
+		ts := e.LedgerClosedAt
+		if ts.IsZero() {
+			ts = e.CreatedAt
+		}
+		ts = ts.UTC()
+		if ts.Before(from) || !ts.Before(to) {
+			continue
+		}
+		idx := int(ts.Sub(from) / interval)
+		if idx >= 0 && idx < len(buckets) {
+			buckets[idx].Count++
+			total++
+		}
+	}
+	return buckets, total
 }

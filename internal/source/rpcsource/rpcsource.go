@@ -65,6 +65,12 @@ func (s *Source) ContractStats(ctx context.Context, contractID string) (source.C
 	return s.store.ContractStats(ctx, contractID)
 }
 
+// EventBuckets aggregates stored event counts into contiguous half-open
+// [Start, End) time buckets. Standalone counts are exact.
+func (s *Source) EventBuckets(ctx context.Context, q source.BucketQuery) (source.BucketSeries, error) {
+	return s.store.EventBuckets(ctx, q)
+}
+
 // Stats summarizes everything stored. Standalone counts are exact.
 func (s *Source) Stats(ctx context.Context) (source.Stats, error) {
 	return s.store.Stats(ctx)

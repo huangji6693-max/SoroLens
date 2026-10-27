@@ -275,6 +275,85 @@ func (p *Postgres) ContractStats(ctx context.Context, contractID string) (source
 	return out, nil
 }
 
+// EventBuckets aggregates stored event counts into contiguous half-open
+// [Start, End) time buckets over [q.From, q.To) using on-chain ledger close
+// time (ledger_closed_at). Empty buckets are generated in SQL via
+// generate_series so quiet periods are preserved with a zero count.
+func (p *Postgres) EventBuckets(ctx context.Context, q source.BucketQuery) (source.BucketSeries, error) {
+	from := q.From.UTC()
+	to := q.To.UTC()
+	out := source.BucketSeries{
+		Interval:    source.FormatBucketInterval(q.Interval),
+		From:        from,
+		To:          to,
+		Buckets:     []source.EventBucket{},
+		Approximate: false,
+	}
+	if !from.Before(to) || q.Interval <= 0 {
+		return out, nil
+	}
+
+	args := []any{
+		from,
+		to,
+		fmt.Sprintf("%d seconds", int64(q.Interval/time.Second)),
+	}
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+
+	joinPredicates := []string{
+		"e.ledger_closed_at >= s.bucket_start",
+		"e.ledger_closed_at < s.bucket_end",
+	}
+	if q.ContractID != "" {
+		joinPredicates = append(joinPredicates, "e.contract_id = "+arg(q.ContractID))
+	}
+	if q.Type != "" {
+		joinPredicates = append(joinPredicates, "e.type = "+arg(q.Type))
+	}
+	if len(q.Topic) > 0 {
+		joinPredicates = append(joinPredicates, "e.topics @> "+arg([]byte("["+string(q.Topic)+"]")))
+	}
+
+	query := `
+		WITH series AS (
+			SELECT gs AS bucket_start,
+			       LEAST(gs + $3::interval, $2::timestamptz) AS bucket_end
+			FROM generate_series($1::timestamptz, $2::timestamptz, $3::interval) AS gs
+			WHERE gs < $2::timestamptz
+		)
+		SELECT s.bucket_start,
+		       s.bucket_end,
+		       COUNT(e.id) AS event_count
+		FROM series s
+		LEFT JOIN events e ON ` + strings.Join(joinPredicates, " AND ") + `
+		GROUP BY s.bucket_start, s.bucket_end
+		ORDER BY s.bucket_start ASC`
+
+	rows, err := p.pool.Query(ctx, query, args...)
+	if err != nil {
+		return out, fmt.Errorf("querying event buckets: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var b source.EventBucket
+		if err := rows.Scan(&b.Start, &b.End, &b.Count); err != nil {
+			return out, fmt.Errorf("scanning event bucket: %w", err)
+		}
+		b.Start = b.Start.UTC()
+		b.End = b.End.UTC()
+		out.Buckets = append(out.Buckets, b)
+		out.TotalEvents += b.Count
+	}
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("reading event buckets: %w", err)
+	}
+	return out, nil
+}
+
 // Stats summarizes everything stored.
 func (p *Postgres) Stats(ctx context.Context) (source.Stats, error) {
 	var out source.Stats

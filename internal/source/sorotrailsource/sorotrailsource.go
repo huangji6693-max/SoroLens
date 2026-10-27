@@ -269,6 +269,48 @@ func (s *Source) ContractStats(ctx context.Context, contractID string) (source.C
 	return out, nil
 }
 
+// EventBuckets derives time-bucketed event counts from a bounded backwards scan
+// of upstream events. Like ContractStats, the series is flagged Approximate
+// whenever the bounded scan did not exhaust upstream history, so a caller never
+// mistakes a bounded scan for a complete dataset.
+func (s *Source) EventBuckets(ctx context.Context, q source.BucketQuery) (source.BucketSeries, error) {
+	from := q.From.UTC()
+	to := q.To.UTC()
+	out := source.BucketSeries{
+		Interval:    source.FormatBucketInterval(q.Interval),
+		From:        from,
+		To:          to,
+		Buckets:     source.BuildEmptyBuckets(from, to, q.Interval),
+		Approximate: true,
+	}
+	if !from.Before(to) || q.Interval <= 0 {
+		out.Approximate = false
+		return out, nil
+	}
+
+	stats, err := s.api.Stats(ctx)
+	if err != nil {
+		return out, err
+	}
+	if stats.LastIngestedLedger == 0 {
+		out.Approximate = false
+		return out, nil
+	}
+
+	res, err := s.scanBackwards(ctx, upstreamQuery{
+		ContractID: q.ContractID,
+		Type:       q.Type,
+		Topic:      q.Topic,
+	}, "", contractScanBudget, stats.LastIngestedLedger, 0)
+	if err != nil {
+		return out, err
+	}
+
+	out.Buckets, out.TotalEvents = source.CountEventsIntoBuckets(from, to, q.Interval, res.events)
+	out.Approximate = !res.exhausted
+	return out, nil
+}
+
 // Stats combines SoroTrail's exact totals with a derived type breakdown.
 func (s *Source) Stats(ctx context.Context) (source.Stats, error) {
 	upstreamStats, err := s.api.Stats(ctx)

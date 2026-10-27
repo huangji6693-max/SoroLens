@@ -49,6 +49,10 @@ func (f *fakeSource) ContractStats(context.Context, string) (source.ContractStat
 	return f.contractStats, f.err
 }
 
+func (f *fakeSource) EventBuckets(context.Context, source.BucketQuery) (source.BucketSeries, error) {
+	return source.BucketSeries{}, f.err
+}
+
 func (f *fakeSource) Stats(context.Context) (source.Stats, error) { return f.stats, f.err }
 func (f *fakeSource) Status(context.Context) source.Status        { return f.status }
 

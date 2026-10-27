@@ -45,6 +45,9 @@ type Store interface {
 	ListContracts(ctx context.Context, q source.ContractQuery) ([]source.Contract, string, error)
 	// ContractStats summarizes one contract's stored events.
 	ContractStats(ctx context.Context, contractID string) (source.ContractStats, error)
+	// EventBuckets aggregates stored event counts into contiguous half-open
+	// [Start, End) time buckets over [q.From, q.To) by ledger_closed_at.
+	EventBuckets(ctx context.Context, q source.BucketQuery) (source.BucketSeries, error)
 	// Stats summarizes everything stored.
 	Stats(ctx context.Context) (source.Stats, error)
 

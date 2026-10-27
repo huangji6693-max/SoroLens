@@ -22,12 +22,14 @@ type stubStore struct {
 	event         source.Event
 	stats         source.Stats
 	contractStats source.ContractStats
+	buckets       source.BucketSeries
 
 	err     error
 	pingErr error
 
 	lastEventQuery    source.EventQuery
 	lastContractQuery source.ContractQuery
+	lastBucketQuery   source.BucketQuery
 }
 
 func (s *stubStore) UpsertEvents(context.Context, []source.Event) (int64, error) { return 0, nil }
@@ -48,6 +50,11 @@ func (s *stubStore) ListContracts(_ context.Context, q source.ContractQuery) ([]
 
 func (s *stubStore) ContractStats(context.Context, string) (source.ContractStats, error) {
 	return s.contractStats, s.err
+}
+
+func (s *stubStore) EventBuckets(_ context.Context, q source.BucketQuery) (source.BucketSeries, error) {
+	s.lastBucketQuery = q
+	return s.buckets, s.err
 }
 
 func (s *stubStore) Stats(context.Context) (source.Stats, error) { return s.stats, s.err }

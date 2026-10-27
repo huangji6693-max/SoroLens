@@ -155,6 +155,10 @@ func (m *mockStore) ContractStats(context.Context, string) (source.ContractStats
 	return source.ContractStats{}, nil
 }
 
+func (m *mockStore) EventBuckets(context.Context, source.BucketQuery) (source.BucketSeries, error) {
+	return source.BucketSeries{}, nil
+}
+
 func (m *mockStore) Stats(context.Context) (source.Stats, error) { return source.Stats{}, nil }
 func (m *mockStore) Ping(context.Context) error                  { return nil }
 func (m *mockStore) Close()                                      {}

@@ -427,6 +427,77 @@ func TestStats(t *testing.T) {
 	require.Len(t, got.TypeBreakdown, 1)
 }
 
+func TestEventBuckets(t *testing.T) {
+	pg := newTestStore(t)
+	ctx := context.Background()
+
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
+	mk := func(seq int, contract, typ string, at time.Time) source.Event {
+		e := event(int64(100+seq), seq, contract)
+		e.Type = typ
+		e.LedgerClosedAt = at
+		return e
+	}
+
+	_, err := pg.UpsertEvents(ctx, []source.Event{
+		mk(1, "CAAA", "contract", base),                                     // bucket 0 start boundary (included)
+		mk(2, "CAAA", "contract", base.Add(30*time.Second)),                 // bucket 0 interior
+		mk(3, "CAAA", "contract", base.Add(time.Minute)),                    // bucket 1 start boundary (excluded from 0, included in 1)
+		mk(4, "CAAA", "diagnostic", base.Add(3*time.Minute+10*time.Second)), // bucket 3 (bucket 2 is a 0-count gap)
+		mk(5, "CBBB", "contract", base.Add(4*time.Minute)),                  // Exact upper bound 'to' for 4m range (excluded)
+	})
+	require.NoError(t, err)
+
+	t.Run("boundary alignment and zero-count gaps in SQL", func(t *testing.T) {
+		series, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base.Add(4 * time.Minute),
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		require.Len(t, series.Buckets, 4)
+		assert.Equal(t, int64(2), series.Buckets[0].Count)
+		assert.Equal(t, int64(1), series.Buckets[1].Count)
+		assert.Equal(t, int64(0), series.Buckets[2].Count, "empty bucket must be present with count 0")
+		assert.Equal(t, int64(1), series.Buckets[3].Count)
+		assert.Equal(t, int64(4), series.TotalEvents, "event at exact upper bound 'to' must be excluded")
+	})
+
+	t.Run("empty range returns empty buckets", func(t *testing.T) {
+		series, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base,
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, series.Buckets)
+		assert.Zero(t, series.TotalEvents)
+	})
+
+	t.Run("bucket totals agree with Stats and ContractStats over full range", func(t *testing.T) {
+		allSeries, err := pg.EventBuckets(ctx, source.BucketQuery{
+			From:     base,
+			To:       base.Add(5 * time.Minute),
+			Interval: time.Minute,
+		})
+		require.NoError(t, err)
+		stats, err := pg.Stats(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, stats.TotalEvents, allSeries.TotalEvents)
+
+		contractSeries, err := pg.EventBuckets(ctx, source.BucketQuery{
+			ContractID: "CAAA",
+			From:       base,
+			To:         base.Add(5 * time.Minute),
+			Interval:   time.Minute,
+		})
+		require.NoError(t, err)
+		cStats, err := pg.ContractStats(ctx, "CAAA")
+		require.NoError(t, err)
+		assert.Equal(t, cStats.TotalEvents, contractSeries.TotalEvents)
+	})
+}
+
 func TestIngestState(t *testing.T) {
 	pg := newTestStore(t)
 	ctx := context.Background()
