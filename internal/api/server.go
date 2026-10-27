@@ -16,15 +16,41 @@ import (
 	"github.com/sorotrail/sorolens/internal/source"
 )
 
+// DefaultHeartbeatInterval is how often GET /api/events/stream writes an SSE
+// heartbeat comment so idle connections survive intermediate proxies.
+const DefaultHeartbeatInterval = 15 * time.Second
+
 // Server holds the API's dependencies.
 type Server struct {
-	src source.EventSource
-	log *slog.Logger
+	src               source.EventSource
+	log               *slog.Logger
+	broker            *Broker
+	heartbeatInterval time.Duration
 }
 
 // New builds an API server over the given event source.
 func New(src source.EventSource, log *slog.Logger) *Server {
-	return &Server{src: src, log: log}
+	return &Server{
+		src:               src,
+		log:               log,
+		heartbeatInterval: DefaultHeartbeatInterval,
+	}
+}
+
+// WithBroker attaches a live event Broker for GET /api/events/stream. When nil,
+// or when running in upstream mode, the stream endpoint reports 501 Not
+// Implemented.
+func (s *Server) WithBroker(b *Broker) *Server {
+	s.broker = b
+	return s
+}
+
+// WithHeartbeatInterval overrides DefaultHeartbeatInterval for SSE keep-alives.
+func (s *Server) WithHeartbeatInterval(d time.Duration) *Server {
+	if d > 0 {
+		s.heartbeatInterval = d
+	}
+	return s
 }
 
 // Routes returns the API router. cmd/sorolens mounts it at /api, except for
@@ -35,16 +61,23 @@ func New(src source.EventSource, log *slog.Logger) *Server {
 func (s *Server) Routes() chi.Router {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
 
-	r.Get("/contracts", s.handleListContracts)
-	r.Get("/contracts/{id}", s.handleGetContract)
-	r.Get("/contracts/{id}/events", s.handleContractEvents)
-	r.Get("/contracts/{id}/stats", s.handleContractStats)
-	r.Get("/events", s.handleListEvents)
-	r.Get("/events/{id}", s.handleGetEvent)
-	r.Get("/stats", s.handleStats)
-	r.Get("/version", s.handleVersion)
+	// Long-lived SSE streams outlive the per-request timeout applied to
+	// ordinary JSON endpoints.
+	r.Get("/events/stream", s.handleEventStream)
+
+	r.Group(func(r chi.Router) {
+		r.Use(middleware.Timeout(60 * time.Second))
+
+		r.Get("/contracts", s.handleListContracts)
+		r.Get("/contracts/{id}", s.handleGetContract)
+		r.Get("/contracts/{id}/events", s.handleContractEvents)
+		r.Get("/contracts/{id}/stats", s.handleContractStats)
+		r.Get("/events", s.handleListEvents)
+		r.Get("/events/{id}", s.handleGetEvent)
+		r.Get("/stats", s.handleStats)
+		r.Get("/version", s.handleVersion)
+	})
 
 	return r
 }

@@ -127,6 +127,19 @@ func (r *statusRecorder) WriteHeader(code int) {
 	r.ResponseWriter.WriteHeader(code)
 }
 
+// Flush forwards http.Flusher so Server-Sent Events handlers behind Middleware
+// can flush each frame to the client immediately.
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// Unwrap exposes the underlying ResponseWriter for http.ResponseController.
+func (r *statusRecorder) Unwrap() http.ResponseWriter {
+	return r.ResponseWriter
+}
+
 // Middleware wraps a handler with per-route HTTP duration instrumentation.
 // route should be the matched URL pattern, not the raw path, so label
 // cardinality stays bounded; use RoutePattern(r) to get it.

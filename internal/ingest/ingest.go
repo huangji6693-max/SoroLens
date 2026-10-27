@@ -35,15 +35,22 @@ type Options struct {
 	RetentionLedgers uint32
 }
 
+// EventPublisher receives newly ingested events after they have been persisted
+// to the store. Implementations must not block the caller.
+type EventPublisher interface {
+	Publish(events []source.Event)
+}
+
 // Ingester polls the RPC and persists what it finds.
 type Ingester struct {
-	rpc     rpc.Client
-	store   store.Store
-	decoder decode.Decoder
-	opts    Options
-	log     *slog.Logger
+	rpc       rpc.Client
+	store     store.Store
+	decoder   decode.Decoder
+	opts      Options
+	log       *slog.Logger
 	// metrics is optional instrumentation; nil-safe, see internal/metrics.
-	metrics *metrics.Metrics
+	metrics   *metrics.Metrics
+	publisher EventPublisher
 }
 
 // New builds an Ingester.
@@ -57,6 +64,13 @@ func New(client rpc.Client, st store.Store, dec decode.Decoder, opts Options, lo
 // WithMetrics attaches Prometheus instrumentation to the ingest loop.
 func (i *Ingester) WithMetrics(m *metrics.Metrics) *Ingester {
 	i.metrics = m
+	return i
+}
+
+// WithPublisher attaches a non-blocking live event publisher (such as the SSE
+// Broker) to be notified after each batch is stored.
+func (i *Ingester) WithPublisher(p EventPublisher) *Ingester {
+	i.publisher = p
 	return i
 }
 
@@ -186,6 +200,9 @@ func (i *Ingester) ingestBatch(ctx context.Context, filters []rpc.EventFilter, s
 			return inserted, err
 		}
 		inserted += n
+		if i.publisher != nil && len(events) > 0 {
+			i.publisher.Publish(events)
+		}
 
 		// A short page means the stream is drained for now.
 		if len(res.Events) < rpc.DefaultEventsLimit {

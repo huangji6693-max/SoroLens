@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -147,6 +150,88 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// handleEventStream serves GET /api/events/stream over Server-Sent Events.
+// It reuses the same filter parameters as GET /api/events (contract_id, type,
+// topic, tx_hash, from_ledger, to_ledger). In upstream mode (or when no broker
+// is wired), it responds with 501 Not Implemented rather than holding open a
+// silent stream that can never yield events.
+func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
+	q, err := EventQueryFromRequest(r)
+	if err != nil {
+		writeError(w, r, http.StatusBadRequest, err)
+		return
+	}
+	if cid := strings.TrimSpace(r.URL.Query().Get("contract_id")); cid != "" {
+		if !config.ValidContractID(cid) {
+			writeError(w, r, http.StatusBadRequest, fmt.Errorf("invalid contract ID %q", cid))
+			return
+		}
+		q.ContractID = cid
+	}
+
+	if s.src.Status(r.Context()).Mode == string(config.ModeSoroTrail) || s.broker == nil {
+		writeError(w, r, http.StatusNotImplemented,
+			errors.New("live event streaming is unavailable in upstream mode; poll GET /api/events with a cursor instead"))
+		return
+	}
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeError(w, r, http.StatusInternalServerError, errors.New("streaming not supported"))
+		return
+	}
+
+	ch, cancel := s.broker.Subscribe(q)
+	defer cancel()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// Flush an immediate heartbeat comment so clients receive the 200 response
+	// headers without waiting for the first matching chain event.
+	if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+		return
+	}
+	flusher.Flush()
+
+	hbInterval := s.heartbeatInterval
+	if hbInterval <= 0 {
+		hbInterval = DefaultHeartbeatInterval
+	}
+	ticker := time.NewTicker(hbInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+			if _, err := io.WriteString(w, ":hb\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, open := <-ch:
+			if !open {
+				return
+			}
+			payload, err := json.Marshal(annotatedEvent{
+				Event: ev,
+				Token: DetectTokenEvent(ev),
+			})
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "id: %s\nevent: event\ndata: %s\n\n", ev.ID, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
 }
 
 // EventQueryFromRequest parses the event filter query parameters shared by the

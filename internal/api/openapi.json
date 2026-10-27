@@ -185,6 +185,56 @@
         }
       }
     },
+    "/events/stream": {
+      "get": {
+        "summary": "Live event stream over Server-Sent Events (standalone mode)",
+        "description": "Streams newly ingested contract events in real time as Server-Sent Events (`text/event-stream`). Delivery is best-effort with a bounded per-subscriber buffer (256 events); slow consumers whose buffer overflows are disconnected and can catch up via `GET /api/events` using the last received event `id` as a reference. Returns 501 Not Implemented in upstream (`sorotrail`) mode.",
+        "parameters": [
+          {
+            "name": "contract_id",
+            "in": "query",
+            "schema": {
+              "type": "string",
+              "pattern": "^C[A-Z2-7]{55}$"
+            },
+            "description": "Restrict stream to one contract"
+          },
+          {
+            "$ref": "#/components/parameters/EventType"
+          },
+          {
+            "$ref": "#/components/parameters/Topic"
+          },
+          {
+            "$ref": "#/components/parameters/FromLedger"
+          },
+          {
+            "$ref": "#/components/parameters/ToLedger"
+          },
+          {
+            "$ref": "#/components/parameters/TxHash"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-Sent Events stream of matching events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
     "/events/{id}": {
       "parameters": [
         {

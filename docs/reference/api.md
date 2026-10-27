@@ -48,6 +48,25 @@ curl 'http://localhost:8080/api/contracts/CC.../events?type=contract&limit=50'
 ### `GET /api/events/{id}`
 Fetch a single event by its unique id (TOID), fully decoded.
 
+### `GET /api/events/stream`
+Stream newly ingested events in real time over Server-Sent Events (`text/event-stream`).
+
+**Query parameters:** Accepts the same filters as `GET /api/events`: `contract_id`, `type` (`contract`, `system`, `diagnostic`), `topic`, `tx_hash`, `from_ledger`, and `to_ledger`.
+
+```bash
+curl -N 'http://localhost:8080/api/events/stream?contract_id=CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC&type=contract'
+```
+
+**Frame format & heartbeats:**
+- An immediate `:hb` comment frame is flushed upon connection so clients receive HTTP 200 headers right away, followed by `:hb` comments every 15 seconds to keep idle connections alive through reverse proxies.
+- Matching events are emitted as `event: event` frames with `id: <TOID>` and `data: <Event JSON>`.
+
+**Backpressure & delivery guarantees:**
+- Delivery is **best-effort** and live-only (no database connection is held per subscriber).
+- Each subscriber has a bounded in-memory channel of **256 events**. The ingester's `Publish` path is non-blocking: if a slow or stalled client fills its 256-event buffer, the broker closes that subscriber's stream and removes the subscription rather than stalling ingestion or growing memory without bound.
+- Clients that disconnect or are dropped for backpressure can catch up without gaps by querying `GET /api/events` with a `cursor` or `from_ledger`.
+- **Upstream mode (`SOURCE_MODE=sorotrail`):** Because upstream mode has no local ingester, `GET /api/events/stream` explicitly returns `501 Not Implemented` rather than holding open a silent stream.
+
 ## Pagination
 
 List responses include `next_cursor`; pass it back as `cursor` for the next page. A null `next_cursor` means you've reached the end. Treat the cursor as opaque.

@@ -62,8 +62,12 @@ func run() error {
 	defer stop()
 
 	m := metrics.New()
+	var broker *api.Broker
+	if cfg.SourceMode == config.ModeRPC {
+		broker = api.NewBroker()
+	}
 
-	src, cleanup, startIngest, err := buildSource(ctx, cfg, log, m)
+	src, cleanup, startIngest, err := buildSource(ctx, cfg, log, m, broker)
 	if err != nil {
 		return err
 	}
@@ -86,7 +90,7 @@ func run() error {
 
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           router(src, log, m, cfg.CORSAllowedOrigins),
+		Handler:           router(src, log, m, cfg.CORSAllowedOrigins, broker),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -103,6 +107,7 @@ func run() error {
 	select {
 	case err := <-serveErr:
 		stop()
+		broker.Shutdown()
 		wg.Wait()
 		if err != nil {
 			return fmt.Errorf("http server: %w", err)
@@ -111,6 +116,10 @@ func run() error {
 	case <-ctx.Done():
 		log.Info("shutdown signal received")
 	}
+
+	// Close active SSE streams before waiting on srv.Shutdown so long-lived
+	// subscribers exit promptly within shutdownTimeout.
+	broker.Shutdown()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
@@ -130,7 +139,7 @@ func run() error {
 // contributors: adding a new SOURCE_MODE means adding a case here and an
 // implementation under internal/source. Nothing else in the program needs to
 // know which backend is in use.
-func buildSource(ctx context.Context, cfg config.Config, log *slog.Logger, m *metrics.Metrics) (
+func buildSource(ctx context.Context, cfg config.Config, log *slog.Logger, m *metrics.Metrics, broker *api.Broker) (
 	src source.EventSource,
 	cleanup func(),
 	startIngest func(context.Context) error,
@@ -177,7 +186,7 @@ func buildSource(ctx context.Context, cfg config.Config, log *slog.Logger, m *me
 			RetentionLedgers: cfg.RetentionLedgers,
 		}, log)
 
-		ingester.WithMetrics(m)
+		ingester.WithMetrics(m).WithPublisher(broker)
 
 		return rpcsource.New(pg, client), pg.Close, ingester.Run, nil
 
@@ -187,8 +196,11 @@ func buildSource(ctx context.Context, cfg config.Config, log *slog.Logger, m *me
 }
 
 // router mounts the web UI at the root and the JSON API under /api.
-func router(src source.EventSource, log *slog.Logger, m *metrics.Metrics, corsOrigins []string) http.Handler {
+func router(src source.EventSource, log *slog.Logger, m *metrics.Metrics, corsOrigins []string, broker ...*api.Broker) http.Handler {
 	apiServer := api.New(src, log)
+	if len(broker) > 0 && broker[0] != nil {
+		apiServer.WithBroker(broker[0])
+	}
 
 	webServer, err := web.New(src, log)
 	if err != nil {
